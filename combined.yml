@@ -1,0 +1,343 @@
+---
+# tcp services config map - not used but needed
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: tcp-services
+  namespace: upstream
+  labels:
+    app.kubernetes.io/name: upstream-ingress
+    app.kubernetes.io/part-of: upstream-ingress
+
+---
+#  udp services config map - not used but needed
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: udp-services
+  namespace: upstream
+  labels:
+    app.kubernetes.io/name: upstream-ingress
+    app.kubernetes.io/part-of: upstream-ingress
+
+---
+# service account that will be bound to the ingress controller - note the name has changed
+# so that it doesn't clash with the default controller for prometheus etc
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: upstream-ingress-serviceaccount
+  namespace: upstream
+  labels:
+    app.kubernetes.io/name: upstream-ingress
+    app.kubernetes.io/part-of: upstream-ingress
+
+---
+# cluster role for ingress controller - note different name
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRole
+metadata:
+  name: upstream-ingress-clusterrole
+  labels:
+    app.kubernetes.io/name: upstream-ingress
+    app.kubernetes.io/part-of: upstream-ingress
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - endpoints
+      - nodes
+      - pods
+      - secrets
+    verbs:
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - "extensions"
+    resources:
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  - apiGroups:
+      - "extensions"
+    resources:
+      - ingresses/status
+    verbs:
+      - update
+
+---
+# role for service account - note different name
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: Role
+metadata:
+  name: upstream-ingress-role
+  namespace: upstream
+  labels:
+    app.kubernetes.io/name: upstream-ingress
+    app.kubernetes.io/part-of: upstream-ingress
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - pods
+      - secrets
+      - namespaces
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      # changed from default value so that leader election does not clash between controllers
+      - "ingress-controller-leader-upstream"
+    verbs:
+      - get
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - create
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - endpoints
+    verbs:
+      - get
+
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: RoleBinding
+metadata:
+  name: upstream-role-nisa-binding
+  namespace: upstream
+  labels:
+    app.kubernetes.io/name: upstream-ingress
+    app.kubernetes.io/part-of: upstream-ingress
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: upstream-ingress-role
+subjects:
+  - kind: ServiceAccount
+    name: upstream-ingress-serviceaccount
+    namespace: upstream
+
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: upstream-ingress-clusterrole-nisa-binding
+  labels:
+    app.kubernetes.io/name: upstream-ingress
+    app.kubernetes.io/part-of: upstream-ingress
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: upstream-ingress-clusterrole
+subjects:
+  - kind: ServiceAccount
+    name: upstream-ingress-serviceaccount
+    namespace: upstream
+
+---
+# base nginx configuration - namespaced for upstream ingress controller
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: nginx-configuration
+  namespace: upstream
+  labels:
+    app.kubernetes.io/name: upstream-ingress
+    app.kubernetes.io/part-of: upstream-ingress
+data:
+  use-proxy-protocol: "false"
+  ssl-redirect: "false"
+  redirect-to-https: "true"
+  hsts: "true"
+  use-http2: "false"  # http/2 fucks up upstream and must be disabled
+#  commented out - enabling this should filter ingress traffic by ip address range
+#  whitelist-source-range: "77.73.158.0/24,10.212.64.0/19"
+
+---
+
+# deployment - configured as default plus
+# * --enable-ssl-passthrough so that ssl can be forwarded to upstream containers
+# * --ingress-class=upstream so that this controller ignores resources not tagged with ingress class upstream
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: upstream-ingress
+    app.kubernetes.io/part-of: upstream-ingress
+  name: upstream-ingress-controller
+  namespace: upstream
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: upstream-ingress
+      app.kubernetes.io/part-of: upstream-ingress
+  template:
+    metadata:
+      annotations:
+        prometheus.io/port: "10254"
+        prometheus.io/scrape: "true"
+      creationTimestamp: null
+      labels:
+        app.kubernetes.io/name: upstream-ingress
+        app.kubernetes.io/part-of: upstream-ingress
+    spec:
+      serviceAccountName: upstream-ingress-serviceaccount
+      containers:
+        - args:
+            - /nginx-ingress-controller
+            - --configmap=$(POD_NAMESPACE)/nginx-configuration
+            - --tcp-services-configmap=$(POD_NAMESPACE)/tcp-services
+            - --udp-services-configmap=$(POD_NAMESPACE)/udp-services
+            - --publish-service=$(POD_NAMESPACE)/upstream-ingress
+            - --enable-ssl-passthrough
+            - --ingress-class=upstream
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+          image: quay.io/kubernetes-ingress-controller/nginx-ingress-controller:0.22.0
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /healthz
+              port: 10254
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 10
+          name: upstream-ingress-controller
+          ports:
+            - containerPort: 80
+              name: https
+              protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /healthz
+              port: 10254
+              scheme: HTTP
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 10
+
+---
+# upstream ingress loadbalancer
+# note that it is not configured to do SSL termination as we wish to delegate this to the upstream services
+kind: Service
+apiVersion: v1
+metadata:
+  name: upstream-ingress
+  namespace: upstream
+  labels:
+    app.kubernetes.io/name: upstream-ingress
+    app.kubernetes.io/part-of: upstream-ingress
+  annotations:
+    # Ensure the ELB idle timeout is less than nginx keep-alive timeout. By default,
+    # NGINX keep-alive is set to 75s. If using WebSockets, the value will need to be
+    # increased to '3600' to avoid any potential issues.
+    service.beta.kubernetes.io/aws-load-balancer-connection-idle-timeout: "60"
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "tcp"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "https"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: "arn:aws:acm:eu-west-1:#{account}:certificate/#{certificate_id}"
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: upstream-ingress
+    app.kubernetes.io/part-of: upstream-ingress
+  ports:
+    - name: https
+      port: 443
+      protocol: TCP
+      targetPort: https
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: http
+---
+
+#### example service for upstream web containers - note this is a Cluster IP service, not a NodePort service
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-upstream
+  namespace: upstream
+spec:
+  selector:
+    app: web-upstream
+  ports:
+    - port: 443
+      targetPort: 443
+---
+# example ingress for above service
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: upstream-ingress
+  annotations:
+    # ensure it's picked up by upstream controller and ignored by default nginx controller
+    kubernetes.io/ingress.class: upstream
+    nginx.ingress.kubernetes.io/default-backend:  web-upstream
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    nginx.ingress.kubernetes.io/aws-load-balancer-ssl-ports: '443'
+    nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+  namespace: upstream
+spec:
+  tls:
+    - hosts:
+        - upsteam.servi.ce
+  rules:
+    - host: upstream.servi.ce
+      http:
+        paths: # omit path section as it's unnecessary
+          - backend:
+              serviceName: web-upstream
+              servicePort: 443
+
+
+
+
+
