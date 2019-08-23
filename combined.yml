@@ -1,3 +1,9 @@
+# this is a small working example of an nginx ingress controller for EKS.
+# it uses an SSL certificate provided from Amazon Certificate Manager and terminates SSL on the 
+# Load balancer to which the ingress service is bound.
+# It routes SSL all the way through to an SSL pod within the cluster, which is useful for when
+# you are running third party apps which ship with self-signed certificates (I'm looking at you, Whatsapp Business Client)
+
 ---
 # tcp services config map - not used but needed
 kind: ConfigMap
@@ -183,7 +189,7 @@ data:
   ssl-redirect: "false"
   redirect-to-https: "true"
   hsts: "true"
-  use-http2: "false"  # http/2 fucks up upstream and must be disabled
+  use-http2: "false"  # http/2 fucks up some upstream and must be disabled
 #  commented out - enabling this should filter ingress traffic by ip address range
 #  whitelist-source-range: "77.73.158.0/24,10.212.64.0/19"
 
